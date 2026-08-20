@@ -14,6 +14,14 @@ GitHub Actions 中各平台 runner 直接调用本脚本即可。
 import sys
 import subprocess
 
+# 强制 stdout/stderr 使用 UTF-8：Windows CI runner 默认代码页为 cp1252，
+# 打印中文(如“执行”)会抛 UnicodeEncodeError；本地中文 Windows(cp936) 不受影响。
+try:
+    sys.stdout.reconfigure(encoding="utf-8")
+    sys.stderr.reconfigure(encoding="utf-8")
+except Exception:  # noqa
+    pass
+
 SCRIPT = "rustdesk_setup_wizard.py"
 
 PLATFORM_NAMES = {

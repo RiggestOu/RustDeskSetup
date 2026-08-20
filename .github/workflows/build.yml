@@ -7,13 +7,18 @@ on:
     tags:
       - 'v*'
 
+# 强制所有步骤(含 PyInstaller 子进程)的 stdout/stderr 使用 UTF-8，
+# 避免 Windows runner(cp1252) 打印中文时 UnicodeEncodeError。
+env:
+  PYTHONIOENCODING: utf-8
+
 jobs:
   windows:
     name: Build Windows
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Install dependencies
@@ -32,8 +37,8 @@ jobs:
     name: Build Linux
     runs-on: ubuntu-26.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Install Qt system dependencies
@@ -68,8 +73,8 @@ jobs:
     name: Build macOS
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
       - name: Install dependencies
