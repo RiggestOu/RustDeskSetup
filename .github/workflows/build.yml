@@ -89,3 +89,62 @@ jobs:
         with:
           name: RustDeskSetup-macOS
           path: dist/RustDeskSetup-macOS
+
+  # 把三个平台的产物合并为一个 zip，方便一次下载
+  package:
+    name: Package All-in-One ZIP
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Reorganize into one folder
+        run: |
+          mkdir -p combined/RustDeskSetup/Windows
+          mkdir -p combined/RustDeskSetup/Linux
+          mkdir -p combined/RustDeskSetup/macOS
+          cp artifacts/RustDeskSetup-Windows/RustDeskSetup.exe combined/RustDeskSetup/Windows/
+          cp artifacts/RustDeskSetup-Linux/RustDeskSetup-Linux combined/RustDeskSetup/Linux/
+          chmod +x combined/RustDeskSetup/Linux/RustDeskSetup-Linux
+          cp artifacts/RustDeskSetup-macOS/RustDeskSetup-macOS combined/RustDeskSetup/macOS/
+          chmod +x combined/RustDeskSetup/macOS/RustDeskSetup-macOS
+          ls -R combined
+
+      - name: Write README
+        run: |
+          cat > combined/RustDeskSetup/README.txt <<'EOF'
+          RustDesk 无人值守配置工具 v1.4
+          ================================
+          一键让 RustDesk 在重启后仍能远程接管（无人值守访问）。
+
+          目录：
+            Windows/RustDeskSetup.exe   Windows 安装版（双击以管理员运行）
+            Linux/RustDeskSetup-Linux    Ubuntu/Debian 等（chmod +x 后 sudo 运行）
+            macOS/RustDeskSetup-macOS    macOS（未签名，需系统设置允许 + 授予屏幕录制/辅助功能权限）
+
+          各平台说明：
+            - Windows：安装后即注册服务、开机自启、启用登录屏密码，重启后远程可直接连锁屏。
+            - Linux  ：本工具会额外设置 GDM 自动登录 + 开机立即锁屏。
+                       效果：本机开机直进桌面后会立刻锁屏（本地仍需密码）；
+                       远程连的是已登录会话，免盲打即可看到并解锁。
+                       （Ubuntu 26.04 默认 Wayland 登录界面无法被 RustDesk 抓取，此方案为等效解法。）
+                       注意：自动登录降低本地物理安全，建议在可信环境或已开启磁盘加密时使用。
+            - macOS  ：未签名 .app 会被 Gatekeeper 拦截，需在系统设置→隐私与安全性中允许；
+                       并手动授予「屏幕录制 / 辅助功能」权限。
+
+          由 GitHub Actions 自动构建，源码见仓库。
+          EOF
+
+      - name: Zip all
+        run: |
+          cd combined
+          zip -r ../RustDeskSetup-all.zip RustDeskSetup
+
+      - name: Upload combined zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustDeskSetup-all
+          path: RustDeskSetup-all.zip

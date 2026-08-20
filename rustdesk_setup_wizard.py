@@ -18,7 +18,8 @@ Linux: /usr/bin/rustdesk 等 / PATH；macOS: /Applications/RustDesk.app / PATH�
 平台差异提示：
   - macOS 还需在系统设置中手动授予 RustDesk「屏幕录制 / 辅助功能」权限，
     且未签名应用会被 Gatekeeper 拦截（需允许或签名公证）。
-  - Linux 在 Wayland 登录界面下暂无法抓取（RustDesk 已知限制），X11 或虚拟显示可行。
+  - Linux：本工具会额外设置 GDM 自动登录 + 开机立即锁屏（让 RustDesk 远程接管已登录会话），
+    本地仍需密码解锁、远程免盲打；X11 或虚拟显示亦可行。
 
 永久密码、自托管(网络设置)、防火墙放行等均由官方客户端 GUI / 安装包负责，
 本工具不再处理（避免覆盖用户在官方客户端里的既有设定）。
@@ -521,6 +522,162 @@ class RustDeskManager:
             return out.strip()
         return None
 
+    # ---- Linux: GDM 自动登录 + 开机立即锁屏 ----
+    def _resolve_target_user(self):
+        """优先取发起者（sudo/pkexec 均以 root 运行），否则取当前用户。"""
+        import getpass, pwd
+        u = os.environ.get("SUDO_USER")
+        if u and u != "root":
+            return u
+        uid = os.environ.get("PKEXEC_UID")
+        if uid and uid.isdigit():
+            try:
+                return pwd.getpwuid(int(uid)).pw_name
+            except Exception:
+                pass
+        return getpass.getuser()
+
+    def _target_user_home(self, user):
+        import pwd
+        try:
+            pw = pwd.getpwnam(user)
+            return pw.pw_dir, pw.pw_uid, pw.pw_gid
+        except Exception:
+            return os.path.expanduser("~" + user), -1, -1
+
+    def _set_gdm_autologin(self, username):
+        candidates = ["/etc/gdm3/custom.conf", "/etc/gdm/custom.conf"]
+        path = next((c for c in candidates if os.path.exists(c)), candidates[0])
+        lines = []
+        if os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.read().splitlines()
+            except Exception:
+                lines = []
+        daemon_idx = next((i for i, ln in enumerate(lines)
+                           if ln.strip().lower() == "[daemon]"), -1)
+        if daemon_idx == -1:
+            lines += ["", "[daemon]",
+                      "AutomaticLoginEnable=True",
+                      "AutomaticLogin=" + username]
+        else:
+            end = daemon_idx + 1
+            while end < len(lines) and not (
+                    lines[end].strip().startswith("[")
+                    and lines[end].strip().endswith("]")):
+                end += 1
+            present = {m.group(1).lower() for m in
+                       (re.match(r"^([\w\-]+)\s*=", lines[j]) for j in range(daemon_idx + 1, end))
+                       if m}
+            new = []
+            for j in range(daemon_idx + 1, end):
+                m = re.match(r"^(AutomaticLoginEnable|AutomaticLogin)\s*=", lines[j], re.IGNORECASE)
+                if m:
+                    key = m.group(1).lower()
+                    new.append("AutomaticLoginEnable=True" if key == "automaticloginenable"
+                               else "AutomaticLogin=" + username)
+                else:
+                    new.append(lines[j])
+            if "automaticloginenable" not in present:
+                new.insert(0, "AutomaticLoginEnable=True")
+            if "automaticlogin" not in present:
+                new.insert(0, "AutomaticLogin=" + username)
+            lines[daemon_idx + 1:end] = new
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines).rstrip("\n") + "\n")
+        return True, f"已写入 GDM 自动登录（用户 {username}）: {path}"
+
+    def _install_autostart_lock(self, username):
+        """安装『开机立即锁屏』自启动项：自动登录进桌面后立刻锁屏。"""
+        home, uid, gid = self._target_user_home(username)
+        adir = os.path.join(home, ".config", "autostart")
+        os.makedirs(adir, exist_ok=True)
+        if uid != -1:
+            try:
+                os.chown(adir, uid, gid)
+            except Exception:
+                pass
+        desktop = os.path.join(adir, "rustdesk-lock-on-login.desktop")
+        content = (
+            "[Desktop Entry]\n"
+            "Type=Application\n"
+            "Name=RustDesk Lock On Auto Login\n"
+            "Comment=Auto-login then immediately lock the screen (skip password blind typing)\n"
+            "Exec=sh -c \"sleep 3 && (gnome-screensaver-command --lock || loginctl lock-session || "
+            "dbus-send --type=method_call --dest=org.gnome.ScreenSaver /org/gnome/ScreenSaver "
+            "org.gnome.ScreenSaver.Lock)\"\n"
+            "X-GNOME-Autostart-enabled=true\n"
+            "NoDisplay=true\n"
+        )
+        with open(desktop, "w", encoding="utf-8") as f:
+            f.write(content)
+        if uid != -1:
+            try:
+                os.chown(desktop, uid, gid)
+            except Exception:
+                pass
+        return True, f"已安装开机锁屏自启动项: {desktop}"
+
+    def set_auto_login_lock(self):
+        """Linux 专用：设置 GDM 自动登录并安装『开机立即锁屏』。
+        效果：本机开机直进桌面后立刻锁屏（本地仍需密码）；
+        RustDesk 远程连的是已登录会话，免盲打即可看到并解锁。"""
+        if PLAT != "linux":
+            return False, "仅 Linux 支持『自动登录并锁屏』，当前系统无需此设置。"
+        if not is_admin():
+            return False, "需要 root 权限（自动登录需改写 /etc/gdm3/custom.conf）。"
+        user = self._resolve_target_user()
+        ok = True
+        msgs = []
+        o, m = self._set_gdm_autologin(user)
+        msgs.append(("✓ " if o else "✗ ") + m); ok = ok and o
+        o, m = self._install_autostart_lock(user)
+        msgs.append(("✓ " if o else "✗ ") + m); ok = ok and o
+        return ok, "\n".join(msgs)
+
+    def remove_auto_login_lock(self):
+        """Linux 专用：撤销 GDM 自动登录与开机锁屏自启动项。"""
+        if PLAT != "linux":
+            return True, "非 Linux，无需处理自动登录。"
+        ok = True
+        msgs = []
+        for path in ("/etc/gdm3/custom.conf", "/etc/gdm/custom.conf"):
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    lines = f.read().splitlines()
+                out, in_daemon = [], False
+                for ln in lines:
+                    s = ln.strip()
+                    if s.lower() == "[daemon]":
+                        in_daemon = True; out.append(ln); continue
+                    if in_daemon and s.startswith("[") and s.endswith("]"):
+                        in_daemon = False
+                    if in_daemon and re.match(
+                            r"^(AutomaticLoginEnable|AutomaticLogin)\s*=", ln, re.IGNORECASE):
+                        continue
+                    out.append(ln)
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("\n".join(out).rstrip("\n") + "\n")
+                msgs.append("✓ 已清除 GDM 自动登录: " + path)
+            except Exception as e:  # noqa
+                ok = False
+                msgs.append("✗ 清除 GDM 自动登录失败 " + path + ": " + str(e))
+        user = self._resolve_target_user()
+        home, _, _ = self._target_user_home(user)
+        desktop = os.path.join(home, ".config", "autostart", "rustdesk-lock-on-login.desktop")
+        if os.path.exists(desktop):
+            try:
+                os.remove(desktop)
+                msgs.append("✓ 已删除开机锁屏自启动项: " + desktop)
+            except Exception as e:  # noqa
+                ok = False
+                msgs.append("✗ 删除自启动项失败: " + str(e))
+        return ok, "\n".join(msgs)
+
 
 # ----------------------------------------------------------------------------
 # 后台执行线程
@@ -564,7 +721,7 @@ class MainWindow(QMainWindow):
         self.mgr = RustDeskManager()
         self.worker = None
         self.deploy_worker = None
-        self.setWindowTitle("RustDesk 无人值守配置工具  ·  v1.3")
+        self.setWindowTitle("RustDesk 无人值守配置工具  ·  v1.4")
         self.resize(860, 700)
         self._build_ui()
         self.refresh_all()
@@ -595,7 +752,9 @@ class MainWindow(QMainWindow):
             "① 确保 RustDesk 服务已安装、开机自启并正在运行（锁屏前就要起来抓取登录界面）；\n"
             "② 启用『允许登录屏幕密码』（allow-logon-screen-password）。\n"
             "永久密码、自托管(网络设置)、防火墙放行等均由官方客户端/安装包负责，本工具不再处理。\n"
-            "（Windows/macOS/Linux 通用；macOS 还需在系统设置手动授予『屏幕录制/辅助功能』权限）")
+            "（Windows/macOS/Linux 通用；macOS 还需在系统设置手动授予『屏幕录制/辅助功能』权限）\n"
+            "Linux 额外：自动设置 GDM 自动登录 + 开机立即锁屏——本机开机进桌面后立刻锁屏（仍要"
+            "本地密码），但远程连的是已登录会话，免盲打即可看到并解锁。")
         tip.setWordWrap(True)
         v.addWidget(tip)
 
@@ -607,8 +766,11 @@ class MainWindow(QMainWindow):
         self.btn_deploy = btn_deploy
         v.addWidget(btn_deploy)
 
-        # 还原（次要操作：仅撤销本工具所设的两项）
-        btn_restore = QPushButton("还原设置（关闭登录屏密码 + 停止并取消服务自启）")
+        # 还原（次要操作：撤销本工具所设的两项；Linux 还撤销自动登录）
+        restore_label = ("还原设置（关闭登录屏密码 + 取消服务自启 + 撤销自动登录）"
+                         if PLAT == "linux" else
+                         "还原设置（关闭登录屏密码 + 取消服务自启）")
+        btn_restore = QPushButton(restore_label)
         btn_restore.clicked.connect(self.on_restore)
         self.btn_restore = btn_restore
         v.addWidget(btn_restore)
@@ -673,6 +835,12 @@ class MainWindow(QMainWindow):
             results.append(("✓ " if ok else "✗ ") + "停止并取消服务自启: " + m)
             if not ok:
                 return False, "\n".join(results)
+            # Linux 撤销 GDM 自动登录 + 开机锁屏
+            if PLAT == "linux":
+                ok, m = self.mgr.remove_auto_login_lock()
+                results.append(("✓ " if ok else "✗ ") + "撤销自动登录并锁屏: " + m)
+                if not ok:
+                    return False, "\n".join(results)
             return True, "\n".join(results)
 
         self._run(_do, "还原设置（关闭登录屏密码 + 取消服务自启）…")
@@ -714,9 +882,16 @@ class MainWindow(QMainWindow):
             results.append(("✓ " if ok else "✗ ") + "登录屏密码: " + m)
             if not ok:
                 return False, "\n".join(results)
+            # Linux 额外：GDM 自动登录 + 开机立即锁屏（免远程盲打）
+            if PLAT == "linux":
+                ok, m = self.mgr.set_auto_login_lock()
+                results.append(("✓ " if ok else "✗ ") + "自动登录并锁屏: " + m)
+                if not ok:
+                    return False, "\n".join(results)
             return True, "\n".join(results)
 
-        self.log_msg("▶ 一键部署无人值守（服务自启+启动 → 登录屏密码）…")
+        self.log_msg("▶ 一键部署无人值守（服务自启+启动 → 登录屏密码"
+                     + (" → 自动登录并锁屏(Linux)" if PLAT == "linux" else "") + "）…")
         self.deploy_worker = DeployWorker(_deploy)
         self.deploy_worker.finished.connect(self._on_deploy_done)
         self.deploy_worker.start()
