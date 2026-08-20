@@ -1,0 +1,21 @@
+# ---- RustDeskSetup 构建产物（由 CI / 本地 PyInstaller 生成，不入库）----
+dist/
+build/
+*.spec
+__pycache__/
+*.pyc
+*.pyo
+
+# ---- 本地 Python 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- agent 内部数据（含项目记忆，不公开）----
+.workbuddy/
+
+# ---- OS ----
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store

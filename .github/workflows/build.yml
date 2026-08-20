@@ -1,0 +1,83 @@
+name: Build RustDesk Setup Wizard
+
+# 触发: 手动触发(workflow_dispatch) 或 推送 tag (v1.0.0 等)
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install pyinstaller pyside6
+      - name: Build
+        run: python build_app.py
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustDeskSetup-Windows
+          path: dist/RustDeskSetup.exe
+
+  linux:
+    # Ubuntu 26.04 (2026-04 LTS) runner。产物为通用 x86_64 ELF，
+    # 只要目标机 glibc >= 构建机即兼容。
+    name: Build Linux
+    runs-on: ubuntu-26.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install Qt system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgl1 \
+            libglib2.0-0 \
+            libxkbcommon-x11-0 \
+            libxcb-xinerama0 \
+            libxcb-icccm4 \
+            libxcb-image0 \
+            libxcb-keysyms1 \
+            libxcb-randr0 \
+            libxcb-render-util0 \
+            libxcb-shape0 \
+            libxcb-cursor0
+      - name: Install Python dependencies
+        run: pip install pyinstaller pyside6
+      - name: Build
+        # 无显示器 CI 下让 Qt 走 offscreen 后端, 避免 import PySide6 时连显示失败
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python build_app.py
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustDeskSetup-Linux
+          path: dist/RustDeskSetup-Linux
+
+  macos:
+    name: Build macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: pip install pyinstaller pyside6
+      - name: Build
+        run: python build_app.py
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: RustDeskSetup-macOS
+          path: dist/RustDeskSetup-macOS
